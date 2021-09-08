@@ -5,7 +5,7 @@ from torchvision import transforms
 import importlib
 from types import SimpleNamespace
 from utils import *
-from networks import VGG16,VGG16_sub, VGG16_stage3, VGG16Affinity
+from networks import VGG16,VGG16_sub, VGG16_stage3, VGG16_affinity
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 
@@ -29,7 +29,7 @@ args = SimpleNamespace(epochs=25,
                        cam_folder="CAMS/",
 
                        stage_1=False,
-                       stage_2=True,
+                       stage_2=False,
                        stage_3=False,
                        stage_affinity=True,
 
@@ -132,20 +132,20 @@ if args.stage_1:
     #
     # ### Cam extraction
     ## Constructing the cam train loader
-    # train_loader_cam = VOC2012DatasetCAM(args.train_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
-    # train_loader_cam = DataLoader(train_loader_cam, batch_size=1, shuffle=False) ## no point in shufflying
-    # print("Extracting CAMS for train...")
-    # model.extract_cams(train_loader_cam, model.session_name+args.cam_folder, args.low_a, args.high_a)
+    train_loader_cam = VOC2012DatasetCAM(args.train_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
+    train_loader_cam = DataLoader(train_loader_cam, batch_size=1, shuffle=False) ## no point in shufflying
+    print("Extracting CAMS for train...")
+    model.extract_cams(train_loader_cam, model.session_name+args.cam_folder, args.low_a, args.high_a)
 
-    # ## Constructing the cam val evaluation loader
-    val_loader_cam = VOC2012DatasetCAM(args.val_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
-    val_loader_cam = DataLoader(val_loader_cam, batch_size=1, shuffle=False) ## no point in shufflying
-    print("Extracting CAMS for val...")
-    model.extract_cams(val_loader_cam, model.session_name+args.cam_folder, args.low_a, args.high_a)
-
+    # # ## Constructing the cam val evaluation loader
+    # val_loader_cam = VOC2012DatasetCAM(args.val_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
+    # val_loader_cam = DataLoader(val_loader_cam, batch_size=1, shuffle=False) ## no point in shufflying
+    # print("Extracting CAMS for val...")
+    # model.extract_cams(val_loader_cam, model.session_name+args.cam_folder, args.low_a, args.high_a)
+    #
 
     ## Cam evaluation
-    # Constructing the cam train evaluate loader
+    # # Constructing the cam train evaluate loader
     train_loader_eval_cam = VOC2012Dataset(args.train_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
     train_loader_eval_cam = DataLoader(train_loader_eval_cam, batch_size=1, shuffle=False) ## no point in shufflying the training data during evaluation
 
@@ -248,7 +248,7 @@ if args.stage_2:
         model.epoch = current_epoch
 
         print("Training epoch...")
-        model.train_epoch(train_loader_subcategory, optimizer)
+        # model.train_epoch(train_loader_subcategory, optimizer)
 
         print("Validating epoch...")
         model.val_epoch(val_loader_subcategory)
@@ -270,23 +270,23 @@ if args.stage_2:
     #
     # ### Cam extraction
     # # ## Constructing the cam train loader
-    train_loader_cam = VOC2012DatasetCAM(args.train_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
-    train_loader_cam = DataLoader(train_loader_cam, batch_size=1, shuffle=False) ## no point in shufflying
-    print("Extracting CAMS for train...")
-    model.extract_cams(train_loader_cam, model.session_name+args.cam_folder, args.low_a, args.high_a)
-
-    # ## Constructing the cam val evaluation loader
-    val_loader_cam = VOC2012DatasetCAM(args.val_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
-    val_loader_cam = DataLoader(val_loader_cam, batch_size=1, shuffle=False) ## no point in shufflying
-    print("Extracting CAMS for val...")
-    model.extract_cams(val_loader_cam, model.session_name+args.cam_folder, args.low_a, args.high_a)
-
-
-    # Constructing the cam train evaluate loader
-    train_loader_eval_cam = VOC2012Dataset(args.train_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
-    train_loader_eval_cam = DataLoader(train_loader_eval_cam, batch_size=1, shuffle=False) ## no point in shufflying the training data during evaluation
-
-    print("Evaluating CAMS for train...")
+    # train_loader_cam = VOC2012DatasetCAM(args.train_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
+    # train_loader_cam = DataLoader(train_loader_cam, batch_size=1, shuffle=False) ## no point in shufflying
+    # print("Extracting CAMS for train...")
+    # model.extract_cams(train_loader_cam, model.session_name+args.cam_folder, args.low_a, args.high_a)
+    #
+    # # ## Constructing the cam val evaluation loader
+    # val_loader_cam = VOC2012DatasetCAM(args.val_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
+    # val_loader_cam = DataLoader(val_loader_cam, batch_size=1, shuffle=False) ## no point in shufflying
+    # print("Extracting CAMS for val...")
+    # model.extract_cams(val_loader_cam, model.session_name+args.cam_folder, args.low_a, args.high_a)
+    #
+    #
+    # # Constructing the cam train evaluate loader
+    # train_loader_eval_cam = VOC2012Dataset(args.train_set, args.labels_dict, args.voc12_img_folder, args.input_dim)
+    # train_loader_eval_cam = DataLoader(train_loader_eval_cam, batch_size=1, shuffle=False) ## no point in shufflying the training data during evaluation
+    #
+    # print("Evaluating CAMS for train...")
     segm_train_accuracy = model.evaluate_cams(train_loader_eval_cam, model.session_name+args.cam_folder, args.voc12_segm_folder)
 
     print(segm_train_accuracy)
@@ -400,7 +400,7 @@ if args.stage_3:
 if args.stage_affinity:
     args.session_name = "Stage_Affinity-Segmentation/"
 
-
+    #
     # train_dataset = VOC2012DatasetAffinity(args.train_set, args.voc12_img_folder, args.input_dim, label_la_dir=args.low_cams,
     #                                        label_ha_dir=args.high_cams, radius=5, transform=transforms.Compose([
     #                               transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
@@ -414,7 +414,7 @@ if args.stage_affinity:
     # val_loader_affinity = DataLoader(val_dataset, batch_size=args.batch_size_affinity, shuffle=False)
     #
     #
-    # model = VGG16Affinity(4).cuda()
+    # model = VGG16_affinity().cuda()
     # model.session_name = args.session_name
     # model.load_pretrained(args.pretrained_weights_affinity)
     # model.epochs = args.epochs_affinity
@@ -448,7 +448,7 @@ if args.stage_affinity:
     #         torch.save(model.state_dict(), model.session_name+"stage_Affinity.pth")
 
     # ### Applying Affinity
-    model = VGG16Affinity(4).cuda()
+    model = VGG16_affinity(4).cuda()
     model.session_name = args.session_name
     model.load_pretrained(args.session_name+"stage_Affinity.pth")
 

@@ -4,7 +4,7 @@ import numpy as np
 import torch.nn.functional as F
 import os
 import matplotlib.pyplot as plt
-from utils import *
+from utils_new_new import *
 import torch.sparse as sparse
 
 class VGG16(nn.Module):
@@ -1478,21 +1478,21 @@ class VGG16_sub(nn.Module):
         return groups
 
 
-class VGG16Affinity(nn.Module):
+class VGG16_affinity(nn.Module):
     def __init__(self, fc6_dilation=4):
-        super(VGG16Affinity, self).__init__()
+        super(VGG16_affinity, self).__init__()
 
         self.n_classes = 20
 
         self.train_history = {"loss": [],
                               "foreground loss": [],
-                              "background loss": [],
-                              "irrelevant loss": []}
+                              "background positive loss": [],
+                              "background negative loss": []}
 
         self.val_history = {"loss": [],
                               "foreground loss": [],
-                              "background loss": [],
-                              "irrelevant loss": []}
+                              "background positive loss": [],
+                              "background negative loss": []}
 
         self.min_val = np.inf
 
@@ -1530,20 +1530,21 @@ class VGG16Affinity(nn.Module):
         self.gn8_5 = nn.modules.normalization.GroupNorm(32, 256)
 
         self.f9 = torch.nn.Conv2d(448, 448, 1, bias=False)
+        self.not_training = [self.conv1_1, self.conv1_2, self.conv2_1, self.conv2_2]
+        self.from_scratch_layers = [self.f8_3, self.f8_4, self.f8_5, self.f9]
+        self.predefined_featuresize = int(448//8)
+
 
         torch.nn.init.kaiming_normal_(self.f8_3.weight)
         torch.nn.init.kaiming_normal_(self.f8_4.weight)
         torch.nn.init.kaiming_normal_(self.f8_5.weight)
         torch.nn.init.xavier_uniform_(self.f9.weight, gain=4)
 
-        self.not_training = [self.conv1_1, self.conv1_2, self.conv2_1, self.conv2_2]
-        self.from_scratch_layers = [self.f8_3, self.f8_4, self.f8_5, self.f9]
-
-        self.predefined_featuresize = int(448//8)
 
         from utils import get_indices_of_pairs
-        self.ind_from, self.ind_to = get_indices_of_pairs(5, (self.predefined_featuresize, self.predefined_featuresize))
-        self.ind_from = torch.from_numpy(self.ind_from); self.ind_to = torch.from_numpy(self.ind_to)
+        self.indices_from, self.indices_to = get_indices_of_pairs(5, (self.predefined_featuresize, self.predefined_featuresize))
+        self.indices_from = torch.from_numpy(self.indices_from)
+        self.indices_to = torch.from_numpy(self.indices_to)
 
         return
 
@@ -1581,51 +1582,64 @@ class VGG16Affinity(nn.Module):
 
 
 
-    def forward(self, x, to_dense=False):
-        # source: https://github.com/jiwoon-ahn/psa
+    def forward(self, x, RW_mode = False):
 
-        d = self.feature_extractor(x)
 
-        f8_3 = F.elu(self.gn8_3(self.f8_3(d['conv4'])))
-        f8_4 = F.elu(self.gn8_4(self.f8_4(d['conv5'])))
-        f8_5 = F.elu(self.gn8_5(self.f8_5(d['conv5fc'])))
+        ## aggregating the feature maps from multiple levels of the backbone as suggested in AffinityNET
+        feat = self.feature_extractor(x)
+
+        f8_3 = F.elu(self.gn8_3(self.f8_3(feat['conv4'])))
+        f8_4 = F.elu(self.gn8_4(self.f8_4(feat['conv5'])))
+        f8_5 = F.elu(self.gn8_5(self.f8_5(feat['conv5fc'])))
 
         x = torch.cat([f8_3, f8_4, f8_5], dim=1)
         x = F.elu(self.f9(x))
 
-        if x.size(2) == self.predefined_featuresize and x.size(3) == self.predefined_featuresize:
-            ind_from = self.ind_from
-            ind_to = self.ind_to
+        if RW_mode:
+            ## we havent presaved the ndices from and indices to for all the possible input resolutions, so in the reference case we have to compute them according to the specific input's resolution
+            indices_from, indices_to = get_indices_of_pairs(5, (x.size(2), x.size(3)))
+            indices_from = torch.from_numpy(indices_from)
+            indices_to = torch.from_numpy(indices_to)
         else:
-            ind_from, ind_to = get_indices_of_pairs(5, (x.size(2), x.size(3)))
-            ind_from = torch.from_numpy(ind_from); ind_to = torch.from_numpy(ind_to)
+            ## we have already calculated the indices from and indices to for the 448x448 input which is used during the training
+            indices_from = self.indices_from
+            indices_to = self.indices_to
 
-        x = x.view(x.size(0), x.size(1), -1)
 
-        ff = torch.index_select(x, dim=2, index=ind_from.cuda(non_blocking=True))
-        ft = torch.index_select(x, dim=2, index=ind_to.cuda(non_blocking=True))
+        x = x.view(x.size(0), x.size(1), -1) ## flattening in the spatial dimensions
 
-        ff = torch.unsqueeze(ff, dim=2)
-        ft = ft.view(ft.size(0), ft.size(1), -1, ff.size(3))
+        f_from = torch.index_select(x, dim=2, index=indices_from.cuda(non_blocking=True)) ## picking the features reffering to the indices_from
+        f_to = torch.index_select(x, dim=2, index=indices_to.cuda(non_blocking=True)) ## picking the features reffering to the indices_to based on the radius distance
 
-        aff = torch.exp(-torch.mean(torch.abs(ft-ff), dim=1))
+        f_from = torch.unsqueeze(f_from, dim=2) # batch X depth of the descriptor X 1 X number of from_indices
+        f_to = f_to.view(f_to.size(0), f_to.size(1), -1, f_from.size(3)) # batch X depth of the descriptor X number of neighboring pairs X number of from_indices
 
-        if to_dense:
-            aff = aff.view(-1).cpu()
 
-            ind_from_exp = torch.unsqueeze(ind_from, dim=0).expand(ft.size(2), -1).contiguous().view(-1)
-            indices = torch.stack([ind_from_exp, ind_to])
-            indices_tp = torch.stack([ind_to, ind_from_exp])
+        WIJ = torch.exp(-torch.mean(torch.abs(f_from-f_to), dim=1)) ## computing the semantic affinity between i and j as described in eq. [3] AffinityNET
+
+        if RW_mode:
+
+            WIJ = WIJ.view(-1).cpu()
+
+            indices_from_expanded = torch.unsqueeze(indices_from, dim=0).expand(f_to.size(2), -1).contiguous().view(-1)
+            indices = torch.stack([indices_from_expanded, indices_to])
+            indices_tp = torch.stack([indices_to, indices_from_expanded])
 
             area = x.size(2)
             indices_id = torch.stack([torch.arange(0, area).long(), torch.arange(0, area).long()])
 
-            aff_mat = sparse.FloatTensor(torch.cat([indices, indices_id, indices_tp], dim=1),
-                                      torch.cat([aff, torch.ones([area]), aff])).to_dense().cuda()
-            return aff_mat
+            affinity_array = sparse.FloatTensor(torch.cat([indices, indices_id, indices_tp], dim=1),
+                                                     torch.cat([WIJ, torch.ones([area]), WIJ])).to_dense().cuda()
+            ## indices - WIJ combination assigns the computed affinities for the top-right diagonal of the aff matrix
+            ## indices_tp - WIJ combination assigns the computed affinities for the bottom-left diagonal of the aff matrix
+            ## indices_id - ones combination assigns one value in the diagonal since a pixel is related with itself the most
+
+
+            return affinity_array
 
         else:
-            return aff
+
+            return WIJ
 
     def load_pretrained(self, pth_file):
 
@@ -1674,10 +1688,10 @@ class VGG16Affinity(nn.Module):
     def train_epoch(self, dataloader, optimizer, verbose=True):
 
         self.train()
-        overall_loss= 0
+        overall_loss = 0
         foreground_loss = 0
-        background_loss = 0
-        neutral_loss = 0
+        background_positive_loss = 0
+        background_negative_loss = 0
 
         for index, data in enumerate(dataloader):
             img = data[0]
@@ -1686,22 +1700,23 @@ class VGG16Affinity(nn.Module):
             fg_label = data[1][1]
             neg_label = data[1][2]
 
-            aff = self.forward(img)
+            WIJ = self.forward(img)
 
-            bg_count = torch.sum(bg_label) + 1e-5  ## to avoid diving by zero
-            fg_count = torch.sum(fg_label) + 1e-5  ##  to avoid diving by zero
-            neg_count = torch.sum(neg_label) + 1e-5  ##  to avoid diving by zero
+            P_fg = torch.sum(fg_label) + 1e-5  ##  to avoid diving by zero
+            L_fg = torch.sum(- fg_label * torch.log(WIJ + 1e-5)) / P_fg
 
-            bg_loss = torch.sum(- bg_label * torch.log(aff + 1e-5)) / bg_count
-            fg_loss = torch.sum(- fg_label * torch.log(aff + 1e-5)) / fg_count
-            neg_loss = torch.sum(- neg_label * torch.log(1. + 1e-5 - aff)) / neg_count
+            P_bg_pos = torch.sum(bg_label) + 1e-5  ## to avoid diving by zero
+            L_bg_pos = torch.sum(- bg_label * torch.log(WIJ + 1e-5)) / P_bg_pos # we add the 1e-5 in the log to avoid calculating the log(0) in cases where the affinity WIJ is 0
 
-            loss = bg_loss / 4 + fg_loss / 4 + neg_loss / 2  ## basically we count irrelevant loss twice as much
+            P_bg_neg = torch.sum(neg_label) + 1e-5  ##  to avoid diving by zero
+            L_bg_neg = torch.sum(- neg_label * torch.log(1. + 1e-5 - WIJ)) / P_bg_neg
+
+            loss = L_fg/4 + L_bg_pos/4 + L_bg_neg/2  ## basically we count background negative loss twice as much as suggested in AffinityNET
 
             overall_loss += loss
-            foreground_loss += fg_loss
-            background_loss += bg_loss
-            neutral_loss += neg_loss
+            foreground_loss += L_fg
+            background_positive_loss += L_bg_pos
+            background_negative_loss += L_bg_neg
 
             optimizer.zero_grad()
             loss.backward()
@@ -1713,27 +1728,27 @@ class VGG16Affinity(nn.Module):
                       'Step: {}/{}\n'
                       'Batch ~ Overall loss : {:.4f}\n'
                       'Batch ~ Foreground loss : {:.4f}\n'
-                      'Batch ~ Background loss : {:.4f}\n'
-                      'Batch ~ Irrelevant loss : {:.4f}\n'.format(self.epoch + 1, self.epochs,
+                      'Batch ~ Background positive loss : {:.4f}\n'
+                      'Batch ~ Irrelevant negative loss : {:.4f}\n'.format(self.epoch + 1, self.epochs,
                                                           index + 1, len(dataloader),
                                                           loss.data.cpu().numpy(),
-                                                          fg_loss.data.cpu().numpy(),
-                                                          bg_loss.data.cpu().numpy(),
-                                                          neg_loss.data.cpu().numpy(),
+                                                          L_fg.data.cpu().numpy(),
+                                                          L_bg_pos.data.cpu().numpy(),
+                                                          L_bg_neg.data.cpu().numpy(),
                                                           ))
 
         self.train_history["loss"].append(overall_loss / len(dataloader))
         self.train_history["foreground loss"].append(foreground_loss / len(dataloader))
-        self.train_history["background loss"].append(background_loss / len(dataloader))
-        self.train_history["irrelevant loss"].append(neutral_loss / len(dataloader))
+        self.train_history["background positive loss"].append(background_positive_loss / len(dataloader))
+        self.train_history["background negative loss"].append(background_negative_loss / len(dataloader))
 
     def val_epoch(self, dataloader, verbose=True):
 
         self.eval()
         overall_loss = 0
         foreground_loss = 0
-        background_loss = 0
-        neutral_loss = 0
+        background_positive_loss = 0
+        background_negative_loss = 0
 
         with torch.no_grad():
 
@@ -1744,22 +1759,23 @@ class VGG16Affinity(nn.Module):
                 fg_label = data[1][1]
                 neg_label = data[1][2]
 
-                aff = self.forward(img)
+                WIJ = self.forward(img)
 
-                bg_count = torch.sum(bg_label) + 1e-5  ## to avoid diving by zero
-                fg_count = torch.sum(fg_label) + 1e-5  ##  to avoid diving by zero
-                neg_count = torch.sum(neg_label) + 1e-5  ##  to avoid diving by zero
+                P_fg = torch.sum(fg_label) + 1e-5  ##  to avoid diving by zero
+                L_fg = torch.sum(- fg_label * torch.log(WIJ + 1e-5)) / P_fg
 
-                bg_loss = torch.sum(- bg_label * torch.log(aff + 1e-5)) / bg_count
-                fg_loss = torch.sum(- fg_label * torch.log(aff + 1e-5)) / fg_count
-                neg_loss = torch.sum(- neg_label * torch.log(1. + 1e-5 - aff)) / neg_count
+                P_bg_pos = torch.sum(bg_label) + 1e-5  ## to avoid diving by zero
+                L_bg_pos = torch.sum(- bg_label * torch.log(WIJ + 1e-5)) / P_bg_pos  # we add the 1e-5 in the log to avoid calculating the log(0) in cases where the affinity WIJ is 0
 
-                loss = bg_loss / 4 + fg_loss / 4 + neg_loss / 2  ## basically we count irrelevant loss twice as much
+                P_bg_neg = torch.sum(neg_label) + 1e-5  ##  to avoid diving by zero
+                L_bg_neg = torch.sum(- neg_label * torch.log(1. + 1e-5 - WIJ)) / P_bg_neg
+
+                loss = L_fg / 4 + L_bg_pos / 4 + L_bg_neg / 2  ## basically we count irrelevant loss twice as much as suggested in AffinityNET
 
                 overall_loss += loss
-                foreground_loss += fg_loss
-                background_loss += bg_loss
-                neutral_loss += neg_loss
+                foreground_loss += L_fg
+                background_positive_loss += L_bg_pos
+                background_negative_loss += L_bg_neg
 
                 if verbose:
                     ### Printing epoch results
@@ -1767,19 +1783,19 @@ class VGG16Affinity(nn.Module):
                           'Step: {}/{}\n'
                           'Batch ~ Overall loss : {:.4f}\n'
                           'Batch ~ Foreground loss : {:.4f}\n'
-                          'Batch ~ Background loss : {:.4f}\n'
-                          'Batch ~ Irrelevant loss : {:.4f}\n'.format(self.epoch + 1, self.epochs,
+                          'Batch ~ Background positive loss : {:.4f}\n'
+                          'Batch ~ Background negative loss : {:.4f}\n'.format(self.epoch + 1, self.epochs,
                                                                       index + 1, len(dataloader),
                                                                       loss.data.cpu().numpy(),
-                                                                      fg_loss.data.cpu().numpy(),
-                                                                      bg_loss.data.cpu().numpy(),
-                                                                      neg_loss.data.cpu().numpy(),
+                                                                      L_fg.data.cpu().numpy(),
+                                                                      L_bg_pos.data.cpu().numpy(),
+                                                                      L_bg_neg.data.cpu().numpy(),
                                                                       ))
 
             self.val_history["loss"].append(overall_loss / len(dataloader))
             self.val_history["foreground loss"].append(foreground_loss / len(dataloader))
-            self.val_history["background loss"].append(background_loss / len(dataloader))
-            self.val_history["irrelevant loss"].append(neutral_loss / len(dataloader))
+            self.val_history["background positive loss"].append(background_positive_loss / len(dataloader))
+            self.val_history["background negative loss"].append(background_negative_loss / len(dataloader))
 
 
     def visualize_graph(self):
@@ -1814,14 +1830,14 @@ class VGG16Affinity(nn.Module):
         plt.figure()
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
-        plt.title("Background loss")
+        plt.title("Background positive loss")
 
-        plt.plot(np.arange(len(self.train_history["background loss"])), self.train_history["background loss"], label="train")
-        plt.plot(np.arange(len(self.val_history["background loss"])), self.val_history["background loss"], label="val")
+        plt.plot(np.arange(len(self.train_history["background positive loss"])), self.train_history["background positive loss"], label="train")
+        plt.plot(np.arange(len(self.val_history["background positive loss"])), self.val_history["background positive loss"], label="val")
 
 
         plt.legend()
-        plt.savefig(self.session_name+"background_loss.png")
+        plt.savefig(self.session_name+"background_positive_loss.png")
         plt.close()
 
         ## Plotting accyracy
@@ -1830,17 +1846,15 @@ class VGG16Affinity(nn.Module):
         plt.ylabel("Loss")
         plt.title("Neutral loss")
 
-        plt.plot(np.arange(len(self.train_history["irrelevant loss"])), self.train_history["irrelevant loss"], label="train")
-        plt.plot(np.arange(len(self.val_history["irrelevant loss"])), self.val_history["irrelevant loss"], label="val")
+        plt.plot(np.arange(len(self.train_history["background negative loss"])), self.train_history["background negative loss"], label="train")
+        plt.plot(np.arange(len(self.val_history["background negative loss"])), self.val_history["background negative loss"], label="val")
 
         plt.legend()
-        plt.savefig(self.session_name+"neutral_loss.png")
+        plt.savefig(self.session_name+"background_positive_negative.png")
         plt.close()
 
 #
     def apply_affinity_on_cams(self, dataloader, cam_folder, affinity_cam_a, affinity_cam_beta, affinity_cam_iters):
-
-        # source: https://github.com/jiwoon-ahn/psa
 
         gt_masks = []
         preds = []
@@ -1853,7 +1867,6 @@ class VGG16Affinity(nn.Module):
             img_key = data[0][0].split("/")[-1].split(".")[0]
             img = data[1]
 
-            name = data[0][0]
             label = data[2][0]
 
             orig_shape = img.shape
@@ -1891,30 +1904,37 @@ class VGG16Affinity(nn.Module):
             cam_full_arr = np.pad(cam_full_arr, ((0, 0), (0, p2d[3]), (0, p2d[1])), mode='constant')
 
             with torch.no_grad():
-                aff_mat = torch.pow(self.forward(img.cuda(), True), affinity_cam_beta)
+                affinity_array = self.forward(img.cuda(), RW_mode=True)
 
-                trans_mat = aff_mat / torch.sum(aff_mat, dim=0, keepdim=True)
-                for _ in range(affinity_cam_iters):
+
+                trans_mat = torch.pow(affinity_array, affinity_cam_beta) ## according to eq. 11 AffinityNet
+
+                ## normalizing the transition matrix
+                D = torch.sum(trans_mat, dim=0, keepdim=True) # computing row-wise sum
+                trans_mat = trans_mat / D ## normalizing row-wise as suggested in AffinityNet paper
+
+                ## computing the T^t transion matrix
+                for index in range(affinity_cam_iters):
                     trans_mat = torch.matmul(trans_mat, trans_mat)
 
                 cam_full_arr = torch.from_numpy(cam_full_arr)
                 cam_full_arr = F.avg_pool2d(cam_full_arr, 8, 8)
 
-                cam_vec = cam_full_arr.view(21, -1)
+                cam_vec = cam_full_arr.view(21, -1) ## vec(Mc)
 
-                cam_rw = torch.matmul(cam_vec.cuda(), trans_mat)
+                cam_rw = torch.matmul(cam_vec.cuda(), trans_mat) ## applying the random walk according to eq. 12
                 cam_rw = cam_rw.view(1, 21, dheight, dwidth)
 
-                cam_rw = torch.nn.Upsample((img.shape[2], img.shape[3]), mode='bilinear')(cam_rw)
-                _, cam_rw_pred = torch.max(cam_rw, 1)
+                cam_rw = torch.nn.Upsample((img.shape[2], img.shape[3]), mode='bilinear')(cam_rw) ## upsampling spatialy the refined cam to fit the original image size
+                cam_refined = torch.argmax(cam_rw,1) ## each pixel is assigned to its highest activated class after the affinityNet refinment
 
-                res = np.uint8(cam_rw_pred.cpu().data[0])[:orig_shape[2], :orig_shape[3]]
+                cam_refined = np.uint8(cam_refined.cpu().data[0])[:orig_shape[2], :orig_shape[3]] ## squeezing the result
 
 
                 gt_mask = Image.open("VOCdevkit/VOC2012/SegmentationClass/" + img_key + '.png')
                 gt_mask = np.array(gt_mask)
 
-                preds.append(res)
+                preds.append(cam_refined)
                 gt_masks.append(gt_mask)
 
         sc = scores(gt_masks, preds, self.n_classes + 1)

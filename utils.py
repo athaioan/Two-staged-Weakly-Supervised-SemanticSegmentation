@@ -131,10 +131,8 @@ def crf_inference(img, probs, t=10, scale_factor=1, labels=21):
     return np.array(Q).reshape((n_labels, h, w))
 
 
-def random_crop(img, cropsize):
-    # source https://github.com/jiwoon-ahn/psa.
+def crop_and_pad(img, cropsize):
     h, w, c = img.shape
-
     ch = min(cropsize, h)
     cw = min(cropsize, w)
 
@@ -143,23 +141,27 @@ def random_crop(img, cropsize):
 
     if w_space > 0:
         cont_left = 0
-        img_left = random.randrange(w_space + 1)
+        img_left = int((w_space + 1)/2)
+
     else:
-        cont_left = random.randrange(-w_space + 1)
+        cont_left = int((-w_space+1)/2)
+
         img_left = 0
 
     if h_space > 0:
         cont_top = 0
-        img_top = random.randrange(h_space + 1)
+        img_top = int((h_space+1)/2)
+
     else:
-        cont_top = random.randrange(-h_space + 1)
+        cont_top = int((-h_space+1)/2)
+
         img_top = 0
 
-    container = np.zeros((cropsize, cropsize, img.shape[-1]), np.float32)
-    container[cont_top:cont_top + ch, cont_left:cont_left + cw] = \
+    final_image = np.zeros((cropsize, cropsize, img.shape[-1]), np.float32)
+    final_image[cont_top:cont_top + ch, cont_left:cont_left + cw] = \
         img[img_top:img_top + ch, img_left:img_left + cw]
 
-    return container
+    return final_image
 
 
 
@@ -218,7 +220,17 @@ def ExtractAffinityLabelInRadius(label, cropsize, radius=5):
 
         return torch.from_numpy(bg_pos_affinity_label).cuda(), torch.from_numpy(fg_pos_affinity_label).cuda(), torch.from_numpy(neg_affinity_label).cuda()
 
+def pad_resize(img, desired_size):
 
+    old_size = img.size
+    ratio = float(desired_size) / max(old_size)
+    new_size = tuple([int(x * ratio) for x in old_size])
+    img = img.resize(new_size, Image.ANTIALIAS)
+    new_im = Image.new("RGB", (desired_size, desired_size))
+    new_im.paste(img, ((desired_size - new_size[0]) // 2,
+                       (desired_size - new_size[1]) // 2))
+
+    return new_im
 
 
 def resize_image(image, min_dim=None, max_dim=None, padding=False):
@@ -568,10 +580,9 @@ class VOC2012DatasetCAM_stage3(Dataset):
 
 
 class VOC2012DatasetAffinity(Dataset):
-    # source: https://github.com/jiwoon-ahn/psa
 
     ### Overwriting some functions of Dataset build in class
-    def __init__(self, img_names, voc12_img_folder, input_dim, label_la_dir, label_ha_dir, radius,transform=None):
+    def __init__(self, img_names, voc12_img_folder, input_dim, label_la_dir, label_ha_dir, radius, transform=None):
 
         self.transform = transform
         self.input_dim = input_dim
@@ -614,7 +625,7 @@ class VOC2012DatasetAffinity(Dataset):
 
         ### resizing and padding the image to fix dimensions inputs
         img_and_label = np.concatenate((img, label), axis=-1)
-        img_and_label = random_crop(img_and_label,self.input_dim)
+        img_and_label = crop_and_pad(img_and_label,self.input_dim)
 
         img = img_and_label[..., :3]
         label = img_and_label[..., 3:]
